@@ -1,4 +1,3 @@
-import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
@@ -8,6 +7,7 @@ from sklearn.ensemble import RandomForestRegressor
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 import matplotlib.pyplot as plt
 from statsmodels.tsa.seasonal import seasonal_decompose
+import streamlit as st
 
 # Define Chinese New Year months for each year
 chinese_new_year_months = {
@@ -23,7 +23,6 @@ chinese_new_year_months = {
     2028: [1],
     2029: [2],
     2030: [2]
-    
 }
 
 # Data preprocessing and feature engineering function
@@ -72,7 +71,7 @@ def convert_to_long_format(data):
     return pd.melt(data, id_vars=['Country', 'Region', 'Product', 'Material',  'Material Description'], value_vars=date_columns, var_name='date', value_name='sales')
 
 # Function to train and evaluate models
-def train_evaluate_model(train_data, test_data, future_model_type):
+def train_evaluate_model(train_data, test_data, future_model_type, threshold=30):
     if future_model_type == "XGBoost":
         model = XGBRegressor(random_state=42, n_estimators=200)
     elif future_model_type == "Random Forest":
@@ -164,10 +163,14 @@ def plot_decomposition(data, title='Decomposition of Sales Data'):
     
     return fig
 
-
 # Initialize Streamlit
 st.set_page_config(layout="wide")
 st.title('Advanced Forecasting Tool')
+
+# Initialize lists for storing summary data
+wape_summary = []
+hit_rate_summary = []
+best_model_summary = []
 
 # Sidebar for data upload and parameter selection
 uploaded_file = st.sidebar.file_uploader("Upload Historical Data", type=["csv", "xlsx"])
@@ -184,67 +187,74 @@ if uploaded_file:
     if data_long is not None:
         data_long = preprocess_data(data_long)
         
-        # Let user select Country, Region and Material Description
-        country_options = data_long['Country'].unique()
-        region_options = data_long['Region'].unique()
-        selected_country = st.sidebar.selectbox('Select Country', country_options)
-        selected_region = st.sidebar.selectbox('Select Region', region_options)
-        material_descriptions = data_long[(data_long['Country'] == selected_country) & (data_long['Region'] == selected_region)]['Product'].unique()
-        #selected_material_descriptions = st.sidebar.multiselect('Select Material Descriptions', material_descriptions, material_descriptions[:8])
-        # Add a CSS snippet to make the multiselect widget scrollable
-        st.markdown("""
-            <style>
-                .stMultiSelect [role="listbox"] {
-                    max-height: 200px;
-                }
-            </style>
-            """, unsafe_allow_html=True)
+        # Add an option to filter by Country and Region or not
+        filter_option = st.sidebar.checkbox('Filter by Country and Region', value=True)
+        
+        if filter_option:
+            # Let user select Country, Region and Material Description
+            country_options = data_long['Country'].unique()
+            region_options = data_long['Region'].unique()
+            selected_country = st.sidebar.selectbox('Select Country', country_options)
+            selected_region = st.sidebar.selectbox('Select Region', region_options)
+            material_descriptions = data_long[(data_long['Country'] == selected_country) & (data_long['Region'] == selected_region)]['Product'].unique()
+            selected_material_descriptions = st.sidebar.multiselect('Select Material Descriptions', material_descriptions, material_descriptions[:500])
 
-        selected_material_descriptions = st.sidebar.multiselect('Select Material Descriptions', material_descriptions, material_descriptions[:500])
-
-        # Let user select date range and model for future prediction
-        st.sidebar.subheader("Future Prediction Settings")
-        slider_key = "future_date_range_slider"
-        future_date_range = st.sidebar.slider("Select the number of months for future prediction", 12, 18, 12, key=slider_key)
-        future_model_type = st.sidebar.selectbox("Select model for future prediction", ["XGBoost", "Random Forest", "ETS", "Best Model"])
+            # Filter data based on selected Country, Region, and Material Description
+            filtered_data = data_long[(data_long['Country'] == selected_country) & 
+                                      (data_long['Region'] == selected_region) & 
+                                      (data_long['Product'].isin(selected_material_descriptions))]
+        else:
+            # If user does not want to filter, use the entire dataset
+            filtered_data = data_long
+            selected_material_descriptions = filtered_data['Product'].unique()
 
         all_predictions = []
         all_history = []
 
-        # Summary tables
-        wape_summary = []
-        hit_rate_summary = []
-        best_model_summary = []
+        # Option for selecting the future no. of months for forecasting demand
+        future_date_range = st.sidebar.slider(
+            "Select the number of months for future prediction", 
+            12, 18, 12, 
+            key="global_slider"
+        )
+        future_model_type = st.sidebar.selectbox(
+            "Select model for future prediction", 
+            ["XGBoost", "Random Forest", "ETS", "Best Model"], 
+            key="global_model"
+        )
 
-      
-              
-                
-        for selected_material_description in selected_material_descriptions:
-            with st.expander(f"Analysis for {selected_material_description} ({selected_country} - {selected_region})", expanded=False):
-                #st.subheader(f"Sales Trend for {selected_material_description}") 
-                
+        # Iterate over unique combinations of Product and Region
+        unique_products_regions = filtered_data[['Product', 'Region']].drop_duplicates()
 
-                # Filter data based on selected Country, Region, and Material Description
-                filtered_data = data_long[(data_long['Product'] == selected_material_description) & 
-                                          (data_long['Country'] == selected_country) & 
-                                          (data_long['Region'] == selected_region)]
-                selected_material_id = filtered_data['Material'].unique()[0]
+        for _, product_region in unique_products_regions.iterrows():
+            selected_product = product_region['Product']
+            selected_region = product_region['Region']
+
+            with st.expander(f"Analysis for {selected_product} in {selected_region}", expanded=False):
+                # Filter data based on selected Product and Region
+                filtered_material_data = filtered_data[
+                    (filtered_data['Product'] == selected_product) &
+                    (filtered_data['Region'] == selected_region)
+                ]
+
+                selected_material_id = filtered_material_data['Material'].unique()[0]
 
                 # Split data in train (80%) and test (20%)
-                split_index = int(len(filtered_data) * 0.8)
+                split_index = int(len(filtered_material_data) * 0.8)
 
                 # Sort data by date to maintain temporal order
-                filtered_data = filtered_data.sort_values(by='date')
+                filtered_material_data = filtered_material_data.sort_values(by='date')
 
                 # Split data into training and testing sets
-                train_data = filtered_data.iloc[:split_index]
-                test_data = filtered_data.iloc[split_index:]
+                train_data = filtered_material_data.iloc[:split_index]
+                test_data = filtered_material_data.iloc[split_index:]
 
-                fig = px.line(filtered_data, x='date', y='sales', title=f'Sales Trend for {selected_material_description}')
+                # Plot sales trend
+                fig = px.line(filtered_material_data, x='date', y='sales', title=f'Sales Trend for {selected_product} in {selected_region}')
                 st.plotly_chart(fig)
                 
-                
-                fig = plot_decomposition(filtered_data)
+                # Plot decomposition
+                fig = plot_decomposition(filtered_material_data)
                 st.pyplot(fig)
 
                 # Train models and display results for all models
@@ -252,18 +262,17 @@ if uploaded_file:
                 wape_scores = []
                 hit_rates = []
                 combined_scores = []
-                threshold = 30  # Define threshold here
 
                 for model_type in ["XGBoost", "Random Forest", "ETS"]:
-                    model, result, result_combined, wape, hit_rate, combined_score  = train_evaluate_model(train_data, test_data, model_type)
+                    model, result, result_combined, wape, hit_rate, combined_score = train_evaluate_model(train_data, test_data, model_type)
 
                     st.subheader(f"Results for {model_type}")
-                    st.write(f"WAPE: {wape*100:.0f}%")
-                    st.write(f"Hit Rate (APE < {threshold}%): {hit_rate:.0f}%")
+                    st.write(f"WAPE: {int(wape * 100)}%")  # Convert to integer
+                    st.write(f"Hit Rate (APE < 30%): {int(hit_rate)}%")  # Convert to integer
 
-                    
-                    # Plotting actuals vs forecast
-                    
+                    # Plotting actuals vs forecast with 4 different colors
+                    fig = px.line(title=f"Actual vs Forecasted Sales for {selected_product} in {selected_region}")
+
                     # Separate data
                     train_actuals = result_combined[result_combined['Dataset'] == 'Train']
                     train_forecast = train_actuals.copy()
@@ -272,9 +281,6 @@ if uploaded_file:
                     test_actuals = result_combined[result_combined['Dataset'] == 'Test']
                     test_forecast = test_actuals.copy()
                     test_forecast['Actuals'] = None
-
-                    # Plotting actuals vs forecast with 4 different colors
-                    fig = px.line(title=f"Actual vs Forecasted Sales for {selected_material_description} ({selected_country} - {selected_region})")
 
                     # Add traces for each category
                     fig.add_scatter(x=train_actuals['Date'], y=train_actuals['Actuals'], mode='lines', name='Train Actuals', line=dict(color='blue'))
@@ -292,19 +298,19 @@ if uploaded_file:
 
                     # Append results to summary tables
                     wape_summary.append({
-                        'Country': selected_country,
-                        'Region': selected_region,
+                        'Country': filtered_material_data['Country'].iloc[0],
+                        'Region': filtered_material_data['Region'].iloc[0],
                         'Material': str(selected_material_id),
-                        'Material Description': selected_material_description,
-                        f'{model_type} WAPE': (wape * 100).round()
+                        'Material Description': selected_product,
+                        f'{model_type} WAPE': int(wape * 100)  # Convert to integer
                     })
 
                     hit_rate_summary.append({
-                        'Country': selected_country,
-                        'Region': selected_region,
+                        'Country': filtered_material_data['Country'].iloc[0],
+                        'Region': filtered_material_data['Region'].iloc[0],
                         'Material': str(selected_material_id),
-                        'Material Description': selected_material_description,
-                        f'{model_type} HitRate': round(hit_rate,0)
+                        'Material Description': selected_product,
+                        f'{model_type} HitRate': int(hit_rate)  # Convert to integer
                     })
 
                 # Determine best model for each material
@@ -314,10 +320,10 @@ if uploaded_file:
 
                 # Add best model to the summary table
                 best_model_summary.append({
-                    'Country': selected_country,
-                    'Region': selected_region,
+                    'Country': filtered_material_data['Country'].iloc[0],
+                    'Region': filtered_material_data['Region'].iloc[0],
                     'Material': str(selected_material_id),
-                    'Material Description': selected_material_description,
+                    'Material Description': selected_product,
                     'Best Model': best_model_type
                 })
 
@@ -329,14 +335,14 @@ if uploaded_file:
                     future_model = models[["XGBoost", "Random Forest", "ETS"].index(future_model_type)]
                     future_model_name = future_model_type
 
-                future_dates = pd.date_range(start=filtered_data['date'].max(), periods=future_date_range + 1, freq='M')[1:]
+                future_dates = pd.date_range(start=filtered_material_data['date'].max(), periods=future_date_range + 1, freq='M')[1:]
                 future_data = pd.DataFrame({'date': future_dates})
                 future_data['month'] = future_data['date'].dt.month
                 future_data['quarter'] = future_data['date'].dt.quarter
                 future_data['year'] = future_data['date'].dt.year
 
                 # Generate month_order for historical and future data
-                last_month_order = filtered_data['month_order'].max()
+                last_month_order = filtered_material_data['month_order'].max()
                 future_data['month_order'] = last_month_order + np.arange(1, future_date_range + 1)
 
                 for year, months in chinese_new_year_months.items():
@@ -381,10 +387,10 @@ if uploaded_file:
 
                 # Create a result dataframe with Country, Material Description, and future predictions
                 future_result = pd.DataFrame({
-                    'Country': [selected_country] * len(future_data),
-                    'Region': [selected_region] * len(future_data),
+                    'Country': [filtered_material_data['Country'].iloc[0]] * len(future_data),
+                    'Region': [filtered_material_data['Region'].iloc[0]] * len(future_data),
                     'Material': [str(selected_material_id)] * len(future_data),
-                    'Material Description': [selected_material_description] * len(future_data),
+                    'Material Description': [selected_product] * len(future_data),
                     'Date': future_data['date'].values,
                     'Prediction': np.maximum(future_predictions, 0).round()
                 })
@@ -393,12 +399,12 @@ if uploaded_file:
                 all_predictions.append(future_result)
              
                 # Display future predictions
-                st.subheader(f"Future Predictions for {selected_material_description}  ({selected_country} - {selected_region})")
+                st.subheader(f"Future Predictions for {selected_product} in {selected_region}")
                 st.write(future_result)
                 
                 # Plot historical data and future predictions
                 # Combine historical and future data
-                historical_data = filtered_data.copy()
+                historical_data = filtered_material_data.copy()
                 historical_data['Type'] = 'Historical'
                 future_result['Type'] = 'Future'
                 combined_data = pd.concat([historical_data[['date', 'sales', 'Type']], future_result[['Date', 'Prediction', 'Type']].rename(columns={'Date': 'date', 'Prediction': 'sales'})])
@@ -406,7 +412,6 @@ if uploaded_file:
                 # Create the plot
                 fig = px.line(combined_data, x='date', y='sales', color='Type', labels={'date': 'Date', 'sales': 'Sales'})
                 fig.update_layout(
-                    #title=f"Sales Forecast for {selected_material_description} ({selected_country} - {selected_region})",
                     xaxis_title="Date",
                     yaxis_title="Sales",
                     legend_title="Data Type"
@@ -416,7 +421,7 @@ if uploaded_file:
                 st.plotly_chart(fig)
                 
                 # Create a historical data DataFrame
-                historical_data = filtered_data[['Country', 'Region', 'Material','Material Description', 'date', 'sales']]
+                historical_data = filtered_material_data[['Country', 'Region', 'Material','Material Description', 'date', 'sales']]
                 # Rename the columns
                 historical_data = historical_data.rename(columns={
                     'date': 'Date',
@@ -427,7 +432,6 @@ if uploaded_file:
                 historical_data['Sales'] = historical_data['Sales'].round(0)
                 all_history.append(historical_data)
         
-        
         # Combine all predictions into a single dataframe and display as a table
         combined_predictions = pd.concat(all_predictions, ignore_index=True)
         # Pivot combined_predictions to have dates as columns
@@ -436,35 +440,88 @@ if uploaded_file:
         # Reset index to flatten the multi-index columns
         pivot_predictions = pivot_predictions.reset_index()
         
-        
-        # Combine all predictions into a single dataframe and display as a table
+        # Combine all history into a single dataframe and display as a table
         combined_history = pd.concat(all_history, ignore_index=True)
-        # Pivot combined_predictions to have dates as columns
+        # Pivot combined_history to have dates as columns
         pivot_history = combined_history.pivot(index=['Country','Region','Material', 'Material Description'], columns='Date', values='Sales')
 
         # Reset index to flatten the multi-index columns
         pivot_history = pivot_history.reset_index()
-        
-        
-        
 
-        # Display summary tables for WAPE, Hit Rate, and Best Model
+        # Combine WAPE, Hit Rate, and Best Model summaries into one DataFrame
+        wape_summary_df = pd.DataFrame(wape_summary).groupby(['Country','Region', 'Material', 'Material Description']).mean().reset_index()
+        hit_rate_summary_df = pd.DataFrame(hit_rate_summary).groupby(['Country','Region','Material', 'Material Description']).mean().reset_index()
+
+        # Create a DataFrame containing information about the best model
+        best_model_summary_df = pd.DataFrame(best_model_summary)
+
+        # Add Best Model's WAPE and Hit Rate columns
+        best_wape_column = []
+        best_hit_rate_column = []
+
+        for index, row in wape_summary_df.iterrows():
+            best_model = best_model_summary_df[
+                (best_model_summary_df['Country'] == row['Country']) &
+                (best_model_summary_df['Region'] == row['Region']) &
+                (best_model_summary_df['Material'] == row['Material']) &
+                (best_model_summary_df['Material Description'] == row['Material Description'])
+            ]['Best Model'].values[0]
+            
+            # Extract the WAPE value of the best model
+            best_wape = row[f'{best_model} WAPE']
+            best_wape_column.append(int(best_wape))
+            
+            # Extract the Hit Rate value of the best model
+            best_hit_rate = hit_rate_summary_df.loc[index, f'{best_model} HitRate']
+            best_hit_rate_column.append(int(best_hit_rate))
+
+        # Add the WAPE and Hit Rate values of the best model to the table
+        wape_summary_df['Best Model WAPE'] = best_wape_column
+        hit_rate_summary_df['Best Model HitRate'] = best_hit_rate_column
+
+        # Adjust the column order, placing the Best Model column before the other model columns
+        wape_summary_df = wape_summary_df[['Country', 'Region', 'Material', 'Material Description', 'Best Model WAPE', 'XGBoost WAPE', 'Random Forest WAPE', 'ETS WAPE']]
+        hit_rate_summary_df = hit_rate_summary_df[['Country', 'Region', 'Material', 'Material Description', 'Best Model HitRate', 'XGBoost HitRate', 'Random Forest HitRate', 'ETS HitRate']]
+
+        # Function to highlight the best WAPE value (smallest) among the four models
+        def highlight_best_wape(row):
+        # Get the minimum value in the specified columns
+            min_value = row[['Best Model WAPE', 'XGBoost WAPE', 'Random Forest WAPE', 'ETS WAPE']].min()
+            # Highlight cells where the value matches the minimum value
+            return ['background-color: lightgreen' if v == min_value else '' for v in row[['Best Model WAPE', 'XGBoost WAPE', 'Random Forest WAPE', 'ETS WAPE']]]
+
+        # Function to highlight the best Hit Rate value (largest) among the four models
+        def highlight_best_hit_rate(row):
+        # Get the maximum value in the specified columns
+            max_value = row[['Best Model HitRate', 'XGBoost HitRate', 'Random Forest HitRate', 'ETS HitRate']].max()
+        # Highlight cells where the value matches the maximum value
+            return ['background-color: lightgreen' if v == max_value else '' for v in row[['Best Model HitRate', 'XGBoost HitRate', 'Random Forest HitRate', 'ETS HitRate']]]
+        
+        # Function to format columns as integers before applying styling
+        def format_columns_as_int(df, columns):
+            for col in columns:
+                df[col] = df[col].astype(int)
+            return df
+
+        # Convert relevant columns to integers
+        wape_summary_df = format_columns_as_int(wape_summary_df, ['Best Model WAPE', 'XGBoost WAPE', 'Random Forest WAPE', 'ETS WAPE'])
+        hit_rate_summary_df = format_columns_as_int(hit_rate_summary_df, ['Best Model HitRate', 'XGBoost HitRate', 'Random Forest HitRate', 'ETS HitRate'])
 
         st.subheader("Best Model Summary Table")
-        best_model_summary_df = pd.DataFrame(best_model_summary)
         st.write(best_model_summary_df)
         
+        # Display WAPE Summary Table with best values highlighted
         st.subheader("WAPE Summary Table")
-        wape_summary_df = pd.DataFrame(wape_summary).groupby(['Country','Region', 'Material', 'Material Description']).mean().reset_index()
-        st.write(wape_summary_df)
+        wape_summary_styled = wape_summary_df.style.apply(highlight_best_wape, axis=1, subset=['Best Model WAPE', 'XGBoost WAPE', 'Random Forest WAPE', 'ETS WAPE'])
+        st.write(wape_summary_styled)
 
+        # Display Hit Rate Summary Table with best values highlighted
         st.subheader("Hit Rate Summary Table")
-        hit_rate_summary_df = pd.DataFrame(hit_rate_summary).groupby(['Country','Region','Material', 'Material Description']).mean().reset_index()
-        st.write(hit_rate_summary_df)
+        hit_rate_summary_styled = hit_rate_summary_df.style.apply(highlight_best_hit_rate, axis=1, subset=['Best Model HitRate', 'XGBoost HitRate', 'Random Forest HitRate', 'ETS HitRate'])
+        st.write(hit_rate_summary_styled)
         
         st.subheader("Combined Future Predictions")
         st.write(pivot_predictions)
-        #st.write(pivot_history)
         
         # Merge pivot_predictions and pivot_history on the common columns
         pivot_predictions = pivot_predictions.drop('Material Description', axis=1)
@@ -473,3 +530,91 @@ if uploaded_file:
         # Display the merged table
         st.subheader("Combined Historical and Future Predictions")
         st.write(merged_data)
+        
+        # Add download button for the combined data
+        csv = merged_data.to_csv(index=False)
+        st.download_button(
+            label="Download Combined Data as CSV",
+            data=csv,
+            file_name='combined_historical_future_predictions.csv',
+            mime='text/csv',
+        )
+
+        # Step 1: Upload the planner's forecast data
+planner_file = st.sidebar.file_uploader("Upload Planner's Forecast Data", type=["csv", "xlsx"])
+planner_data = None
+
+if planner_file:
+    if planner_file.name.endswith('.csv'):
+        planner_data = pd.read_csv(planner_file)
+    else:
+        planner_data = pd.read_excel(planner_file)
+    
+    # Convert the data to long format for subsequent processing
+    planner_data = planner_data.melt(id_vars=['Country', 'Region', 'Material', 'Material Description'], 
+                                     var_name='Date', value_name='Planner_Forecast')
+    planner_data['Date'] = pd.to_datetime(planner_data['Date'], format='%Y-%m')
+
+# Step 2: Only select data for the next three months for comparison
+if planner_data is not None:
+    combined_predictions['Material'] = combined_predictions['Material'].astype(str)
+    planner_data['Material'] = planner_data['Material'].astype(str)
+
+    combined_predictions['Date'] = pd.to_datetime(combined_predictions['Date'], format='%Y-%m')
+    planner_data['Date'] = pd.to_datetime(planner_data['Date'], format='%Y-%m')
+
+    #  Merge the planner's forecast data with the model's forecast data
+    comparison_data = pd.merge(
+        combined_predictions, 
+        planner_data[['Country', 'Region', 'Material', 'Date', 'Planner_Forecast']],
+        on=['Country', 'Region', 'Material', 'Date'],
+        how='inner'
+    )
+    
+    # Select data for the next three months
+    last_date = comparison_data['Date'].max()
+    first_future_date = last_date - pd.DateOffset(months=2)
+    comparison_data = comparison_data[(comparison_data['Date'] >= first_future_date) & (comparison_data['Date'] <= last_date)]
+
+    comparison_data['Difference'] = (comparison_data['Prediction'] - comparison_data['Planner_Forecast']).abs()
+
+    # Step 3: Calculate the differences and display the top 20 SKUs with the largest differences
+    # Calculate the total difference for the next three months by Material
+    top_20_diff = comparison_data.groupby(['Country', 'Region', 'Material', 'Material Description']).agg({
+        'Difference': 'sum'
+    }).reset_index().sort_values(by='Difference', ascending=False).head(20)
+    
+    top_20_diff['Difference'] = top_20_diff['Difference'].round(0).astype(int)
+    st.subheader("Top 20 SKUs with Largest Difference between Model and Planner Forecast (Next 3 Months)")
+    st.write(top_20_diff)
+
+    # Provide a download option
+    csv_diff = top_20_diff.to_csv(index=False)
+    st.download_button(
+        label="Download Comparison Data as CSV",
+        data=csv_diff,
+        file_name='comparison_top_20_diff.csv',
+        mime='text/csv',
+    )
+
+    # Step 4: Display the complete comparison data table (optional)
+    st.subheader("Complete Comparison of Model and Planner Forecast for Next 3 Months")
+
+    # Calculate the %change column
+    comparison_data['Planner_Forecast'] = comparison_data['Planner_Forecast'].round(0).astype(int)
+    comparison_data['Difference'] = comparison_data['Difference'].round(0).astype(int)
+    comparison_data['%change'] = ((comparison_data['Difference'] / comparison_data['Planner_Forecast']).replace([float('inf'), -float('inf')], np.nan) * 100).round(0).astype(int).astype(str) + '%'
+
+    comparison_data = comparison_data[['Country', 'Region', 'Material', 'Material Description', 'Date', 'Type', 'Prediction', 'Planner_Forecast', 'Difference', '%change']]
+    comparison_data['Date'] = comparison_data['Date'].dt.strftime('%Y-%m')
+    st.write(comparison_data)
+
+    # Provide a download option for the full comparison data (optional)
+    csv_full = comparison_data.to_csv(index=False)
+    st.download_button(
+        label="Download Full Comparison Data as CSV",
+        data=csv_full,
+        file_name='full_comparison_data.csv',
+        mime='text/csv',
+    )
+
